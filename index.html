@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Family Road Safety Alert</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+     background:#0e0e10;color:#e8e8ea}
+#banner{padding:16px;font-weight:700}
+#banner.clear{background:#14361f;color:#7ee2a0;border-bottom:2px solid #2f7d4f}
+#banner.danger{background:#4a1010;color:#ff9a9a;border-bottom:2px solid #d33;
+     animation:flash 1s infinite}
+@keyframes flash{0%,100%{background:#4a1010}50%{background:#6b1616}}
+#banner .t{font-size:20px}
+#banner .s{font-size:13px;font-weight:400;opacity:.9;margin-top:4px}
+#map{height:48vh;background:#1a1a1d}
+.wrap{padding:12px 14px 40px}
+.card{background:#17171a;border:1px solid #26262b;border-radius:10px;
+     padding:12px 14px;margin-bottom:12px}
+.card h2{margin:0 0 10px;font-size:12px;letter-spacing:1px;text-transform:uppercase;
+     color:#8a8a94;font-weight:600}
+.row{display:flex;justify-content:space-between;padding:6px 0;
+     border-bottom:1px solid #232328;font-size:14px}
+.row:last-child{border-bottom:none}
+.lbl{color:#8a8a94}
+.btn{display:block;width:100%;padding:14px;border:none;border-radius:9px;
+     font-size:15px;font-weight:600;margin-bottom:10px}
+.primary{background:#2f6fd0;color:#fff}
+.warn{background:#8a5a00;color:#ffe2a8}
+a.nav{display:block;text-align:center;padding:14px;border-radius:9px;
+     background:#1f7a3d;color:#fff;text-decoration:none;font-weight:600;margin-bottom:10px}
+.note{font-size:12px;color:#6f6f78;line-height:1.6}
+</style>
+</head>
+<body>
+
+<div id="banner" class="clear">
+  <div class="t" id="btitle">AREA CLEAR</div>
+  <div class="s" id="bsub">Tap the blue button to start monitoring</div>
+</div>
+
+<div id="map"></div>
+
+<div class="wrap">
+  <button class="btn primary" id="enable">START MONITORING</button>
+  <a class="nav" id="navlink" href="#" style="display:none">NAVIGATE TO ACCIDENT</a>
+  <button class="btn warn" id="sim">DEMO: SIMULATE ENTERING ZONE</button>
+
+  <div class="card">
+    <h2>Your position</h2>
+    <div class="row"><span class="lbl">Status</span><span id="mystat">Not started</span></div>
+    <div class="row"><span class="lbl">Coordinates</span><span id="mypos">--</span></div>
+    <div class="row"><span class="lbl">Distance to zone</span><span id="mydist">--</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Active accident zones</h2>
+    <div id="zonelist"><div class="row"><span class="lbl">None</span><span>Roads clear</span></div></div>
+  </div>
+
+  <div class="card">
+    <h2>Vehicle</h2>
+    <div class="row"><span class="lbl">Rider</span><span id="vrider">--</span></div>
+    <div class="row"><span class="lbl">Position</span><span id="vpos">--</span></div>
+    <div class="row"><span class="lbl">Satellites</span><span id="vsat">--</span></div>
+  </div>
+
+  <p class="note">
+    This page checks for new accident zones every 5 seconds.
+    Keep it open in your browser while travelling.
+    An alarm will sound if you come within the danger radius.
+  </p>
+</div>
+
+<script>
+/* ==================================================================
+   PASTE YOUR FIREBASE LINK BELOW.
+   It must look like this, with NO slash at the end:
+   https://something-default-rtdb.firebaseio.com
+   ================================================================== */
+
+var FIREBASE_URL = "https://bike-safety-24bd6-default-rtdb.asia-southeast1.firebasedatabase.app";
+
+/* ============ nothing below needs to be changed ============ */
+
+var map, meMarker, vehMarker, layers = [];
+var zones = [], myLat = null, myLng = null;
+var audioCtx = null, alarmTimer = null, inZone = false, simulate = false;
+
+map = L.map('map').setView([9.9252, 78.1198], 16);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+  {maxZoom:19, attribution:'OpenStreetMap'}).addTo(map);
+
+function dist(a1,o1,a2,o2){
+  var R=6371000,dA=(a2-a1)*Math.PI/180,dO=(o2-o1)*Math.PI/180;
+  var x=Math.sin(dA/2)*Math.sin(dA/2)+Math.cos(a1*Math.PI/180)*
+        Math.cos(a2*Math.PI/180)*Math.sin(dO/2)*Math.sin(dO/2);
+  return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));
+}
+
+function beep(){
+  if(!audioCtx) return;
+  var o=audioCtx.createOscillator(), g=audioCtx.createGain();
+  o.type='square'; o.frequency.value=900;
+  g.gain.setValueAtTime(0.3,audioCtx.currentTime);
+  o.connect(g); g.connect(audioCtx.destination);
+  o.start(); o.stop(audioCtx.currentTime+0.2);
+}
+
+function startAlarm(){
+  if(alarmTimer) return;
+  beep();
+  alarmTimer=setInterval(function(){
+    beep();
+    if(navigator.vibrate) navigator.vibrate([300,150,300]);
+  },1200);
+}
+function stopAlarm(){ if(alarmTimer){clearInterval(alarmTimer); alarmTimer=null;} }
+
+document.getElementById('enable').onclick=function(){
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  beep();
+  if(navigator.geolocation){
+    navigator.geolocation.watchPosition(function(p){
+      if(simulate) return;
+      myLat=p.coords.latitude; myLng=p.coords.longitude;
+      document.getElementById('mystat').textContent='Tracking live';
+      check();
+    },function(){
+      document.getElementById('mystat').textContent='Location blocked - allow it in the browser';
+    },{enableHighAccuracy:true,maximumAge:2000,timeout:20000});
+  }
+  this.style.display='none';
+};
+
+document.getElementById('sim').onclick=function(){
+  if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  if(zones.length===0){alert('No accident zone is active right now.');return;}
+  simulate=!simulate;
+  if(simulate){
+    myLat=zones[0].lat+0.00005; myLng=zones[0].lng;
+    this.textContent='DEMO ON - TAP TO LEAVE ZONE';
+    document.getElementById('mystat').textContent='Simulated position';
+  }else{
+    myLat=zones[0].lat+0.005; myLng=zones[0].lng;
+    this.textContent='DEMO: SIMULATE ENTERING ZONE';
+  }
+  check();
+};
+
+function check(){
+  var b=document.getElementById('banner');
+  var nd=999999, near=null;
+
+  if(myLat!==null){
+    for(var i=0;i<zones.length;i++){
+      var d=dist(myLat,myLng,zones[i].lat,zones[i].lng);
+      if(d<nd){nd=d; near=zones[i];}
+    }
+    document.getElementById('mypos').textContent=myLat.toFixed(5)+', '+myLng.toFixed(5);
+    if(!meMarker){
+      meMarker=L.circleMarker([myLat,myLng],{radius:8,color:'#2f6fd0',
+        fillColor:'#2f6fd0',fillOpacity:1}).addTo(map).bindPopup('You');
+    } else meMarker.setLatLng([myLat,myLng]);
+  }
+
+  if(near && nd<=(near.radius||20)){
+    inZone=true;
+    b.className='danger';
+    document.getElementById('btitle').textContent='DANGER - ACCIDENT ZONE';
+    document.getElementById('bsub').textContent=
+      'An accident was reported here. You are '+nd.toFixed(0)+' m away. Slow down.';
+    document.getElementById('mydist').textContent=nd.toFixed(1)+' m (INSIDE)';
+    startAlarm();
+  }else{
+    if(inZone) stopAlarm();
+    inZone=false;
+    b.className='clear';
+    document.getElementById('btitle').textContent='AREA CLEAR';
+    if(near){
+      document.getElementById('bsub').textContent='Nearest accident zone is '+nd.toFixed(0)+' m away.';
+      document.getElementById('mydist').textContent=nd.toFixed(1)+' m';
+    }else if(myLat===null){
+      document.getElementById('bsub').textContent='Tap the blue button to start monitoring';
+    }else{
+      document.getElementById('bsub').textContent='No accident zones active near you.';
+      document.getElementById('mydist').textContent='none active';
+    }
+  }
+}
+
+function refresh(){
+  fetch(FIREBASE_URL+'/.json').then(function(r){return r.json();}).then(function(d){
+    zones=[];
+    var now=Math.floor(Date.now()/1000);
+
+    if(d && d.zones){
+      for(var k in d.zones){
+        var z=d.zones[k];
+        if(z && z.active && z.expiresAt>now) zones.push(z);
+      }
+    }
+
+    for(var i=0;i<layers.length;i++) map.removeLayer(layers[i]);
+    layers=[];
+
+    var list=document.getElementById('zonelist');
+    if(zones.length===0){
+      list.innerHTML='<div class="row"><span class="lbl">None</span><span>Roads clear</span></div>';
+      document.getElementById('navlink').style.display='none';
+    }else{
+      var html='';
+      for(var i=0;i<zones.length;i++){
+        var z=zones[i], r=z.radius||20;
+        var c=L.circle([z.lat,z.lng],{radius:r,color:'#d33',fillColor:'#d33',
+              fillOpacity:0.25,weight:2}).addTo(map);
+        var m=L.marker([z.lat,z.lng]).addTo(map).bindPopup('Accident: '+(z.time||''));
+        layers.push(c); layers.push(m);
+        var left=z.expiresAt-now;
+        html+='<div class="row"><span class="lbl">'+z.lat.toFixed(5)+', '+z.lng.toFixed(5)+
+              '</span><span>'+Math.floor(left/60)+'m '+(left%60)+'s left</span></div>';
+      }
+      list.innerHTML=html;
+      var nv=document.getElementById('navlink');
+      nv.href='https://www.google.com/maps/dir/?api=1&destination='+
+              zones[0].lat+','+zones[0].lng+'&travelmode=driving';
+      nv.style.display='block';
+      if(!meMarker) map.setView([zones[0].lat,zones[0].lng],17);
+    }
+
+    if(d && d.vehicle){
+      document.getElementById('vrider').textContent=d.vehicle.rider||'--';
+      document.getElementById('vpos').textContent=
+        d.vehicle.lat.toFixed(5)+', '+d.vehicle.lng.toFixed(5);
+      document.getElementById('vsat').textContent=d.vehicle.satellites;
+      if(!vehMarker){
+        vehMarker=L.circleMarker([d.vehicle.lat,d.vehicle.lng],{radius:7,
+          color:'#f0b429',fillColor:'#f0b429',fillOpacity:1}).addTo(map).bindPopup('Vehicle');
+      } else vehMarker.setLatLng([d.vehicle.lat,d.vehicle.lng]);
+    }
+
+    check();
+  }).catch(function(e){
+    document.getElementById('bsub').textContent='Cannot reach database - check the Firebase link';
+  });
+}
+
+refresh();
+setInterval(refresh,5000);
+</script>
+</body>
+</html>
